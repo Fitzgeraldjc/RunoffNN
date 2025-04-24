@@ -36,6 +36,7 @@ def load_nwm_predictions(folder_path):
         
         return predictions_df
     return None
+    print("1 done")
 
 def load_usgs_observations(folder_path):
     """Load and process USGS observation data."""
@@ -54,7 +55,7 @@ def load_usgs_observations(folder_path):
     observations_df = observations_df[observations_df['DateTime'].dt.minute == 0]
     
     return observations_df
-
+print("2 done")
 
 def align_data(predictions_df, observations_df):
     """Align prediction and observation data by timestamp."""
@@ -76,6 +77,7 @@ def align_data(predictions_df, observations_df):
     merged_data = pd.merge(predictions_df, observations_hourly, on='timestamp', how='inner')
     
     return merged_data
+print("3 done")
 
 def create_supervised_dataset(merged_data):
     """Create feature-target pairs for supervised learning."""
@@ -110,6 +112,7 @@ def create_supervised_dataset(merged_data):
     y = np.array(target_list)
     
     return X, y
+print("4 done")
 
 def process_data_for_nn(folder_path):
     """Process all data from a folder for neural network training."""
@@ -128,6 +131,7 @@ def process_data_for_nn(folder_path):
     X, y = create_supervised_dataset(merged_data)
     
     return X, y
+print("5 done")
 
 # Example usage
 if __name__ == "__main__":
@@ -139,4 +143,5 @@ if __name__ == "__main__":
             if X is not None and y is not None:
                 print(f"Created dataset with {X.shape[0]} sequences")
                 print(f"Feature shape: {X.shape}, Target shape: {y.shape}")
+                print(X.shape, y.shape)
 
