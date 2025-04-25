@@ -71,9 +71,9 @@ The training process generates:
 - Loss curves for training and validation
 - Prediction vs. observation scatter plots
 - Sample sequence predictions
-C:\Users\speci\Documents\GitHub\RunoffNN\models\training_history.png
-C:\Users\speci\Documents\GitHub\RunoffNN\models\model_evaluation.png
-Restults are saved in the models directory
+![Model Evaluation](models/model_evaluation.png)
+![Training History](models/training_history.png)
+Results are saved in the models directory
 
 ## Requirements
 
