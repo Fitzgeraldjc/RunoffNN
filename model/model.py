@@ -8,67 +8,42 @@ from torch.utils.tensorboard import SummaryWriter
 import os
 import time
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from torch.utils.data import TensorDataset, DataLoader
 
-from utilities import prepare_data_for_training, create_dataloaders
+# Import the new function
+from utilities import combine_data_from_folders
 
+# First, simplify the model architecture for stability
 class RunoffLSTM(nn.Module):
-    def __init__(self, input_size=12, hidden_size=64, num_layers=2):
+    def __init__(self, input_size=12, hidden_size=32, num_layers=1):
         super(RunoffLSTM, self).__init__()
         self.lstm = nn.LSTM(
             input_size=input_size, 
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=0.2
+            dropout=0.0  # Disable dropout initially
         )
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.Tanh(),
-            nn.Linear(hidden_size, 1),
-            nn.Softmax(dim=1)
-        )
+        # Simpler architecture - no attention for now
         self.fc = nn.Sequential(
-            nn.Linear(hidden_size, 32),
+            nn.Linear(hidden_size, 16),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(32, 1)
+            nn.Linear(16, 1)
         )
         
     def forward(self, x):
         # x shape: [batch, seq_len, features]
         lstm_out, _ = self.lstm(x)  # [batch, seq_len, hidden_size]
-        
-        # Optional attention mechanism
-        attention_weights = self.attention(lstm_out)  # [batch, seq_len, 1]
-        context = torch.sum(attention_weights * lstm_out, dim=1)  # [batch, hidden_size]
-        
-        # For sequence-to-sequence prediction (return predictions for each time step)
         output = self.fc(lstm_out)  # [batch, seq_len, 1]
         return output
 
-def custom_loss(pred, target, high_flow_weight=0.5):
-    """
-    Custom loss function that penalizes errors on high flow events more.
-    Args:
-        pred: Model predictions
-        target: Ground truth values
-        high_flow_weight: Weight for high flow errors (0.5 = 50% extra weight)
-    """
-    # Standard MSE
-    mse = torch.mean((pred - target) ** 2)
-    
-    # Identify high flow events (top 20%)
-    threshold = torch.quantile(target, 0.8)
-    high_flow_mask = target > threshold
-    
-    # If we have high flow events, add additional penalty
-    if torch.any(high_flow_mask):
-        high_flow_error = torch.mean((pred[high_flow_mask] - target[high_flow_mask]) ** 2)
-        return mse + high_flow_weight * high_flow_error
-    return mse
+# Use standard MSE loss initially until training stabilizes
+def custom_loss(pred, target, high_flow_weight=0.0):  # Setting weight to 0 = standard MSE
+    return torch.mean((pred - target) ** 2)
 
-def train_one_epoch(model, train_loader, optimizer, device='cpu'):
-    """Train the model for one epoch."""
+# Update the train_one_epoch function to include gradient clipping
+def train_one_epoch(model, train_loader, optimizer, device='cpu', clip_value=0.25):
+    """Train the model for one epoch with gradient clipping to prevent explosions."""
     model.train()
     total_loss = 0
     for batch_idx, (data, target) in enumerate(train_loader):
@@ -77,12 +52,21 @@ def train_one_epoch(model, train_loader, optimizer, device='cpu'):
         optimizer.zero_grad()
         output = model(data)
         loss = custom_loss(output, target)
-        loss.backward()
-        optimizer.step()
         
+        # Check for NaN loss
+        if torch.isnan(loss).item():
+            print(f"Warning: NaN loss detected in batch {batch_idx}. Skipping.")
+            continue
+            
+        loss.backward()
+        
+        # Add gradient clipping to prevent explosion
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+        
+        optimizer.step()
         total_loss += loss.item()
     
-    return total_loss / len(train_loader)
+    return total_loss / max(1, len(train_loader))  # Avoid division by zero
 
 def validate(model, val_loader, device='cpu'):
     """Validate the model."""
@@ -96,8 +80,12 @@ def validate(model, val_loader, device='cpu'):
     
     return val_loss / len(val_loader)
 
-def train_model(folder_path, epochs=100, batch_size=32, learning_rate=0.001, window_size=8, step=2):
-    """Train the runoff prediction model."""
+# In the train_model function, add data preprocessing:
+def train_model(folder_paths, epochs=100, batch_size=32, learning_rate=0.0001, window_size=8, step=2):
+    """
+    Train the runoff prediction model on combined data from multiple folders.
+    Train on data outside Oct 2022-Apr 2023, test on Oct 2022-Apr 2023.
+    """
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -106,20 +94,95 @@ def train_model(folder_path, epochs=100, batch_size=32, learning_rate=0.001, win
     os.makedirs('runs', exist_ok=True)
     os.makedirs('models', exist_ok=True)
     
-    # Prepare data
-    X_tensor, y_tensor = prepare_data_for_training(folder_path, window_size=window_size, step=step)
-    if X_tensor is None or y_tensor is None:
+    # Prepare data from multiple folders with time-based split
+    X_train, y_train, X_test, y_test = combine_data_from_folders(
+        folder_paths, window_size=window_size, step=step)
+    
+    # Check input data for problems
+    if X_train is not None:
+        print(f"X_train shape: {X_train.shape}, contains NaN: {torch.isnan(X_train).any()}")
+        print(f"X_train min: {X_train.min()}, max: {X_train.max()}")
+        print(f"X_train mean: {X_train.mean()}")
+        
+        # Check for infinite values
+        print(f"X_train contains inf: {torch.isinf(X_train).any()}")
+        
+        # Sample some values to inspect
+        print(f"First sequence first timestep: {X_train[0, 0]}")
+        
+    if y_train is not None:
+        print(f"y_train shape: {y_train.shape}, contains NaN: {torch.isnan(y_train).any()}")
+        print(f"y_train min: {y_train.min()}, max: {y_train.max()}")
+        print(f"y_train mean: {y_train.mean()}")
+    
+    if X_train is None or y_train is None:
         print("Failed to prepare data. Exiting.")
         return None
     
-    # Create dataloaders
-    train_loader, val_loader, test_loader = create_dataloaders(X_tensor, y_tensor, batch_size=batch_size)
+    # Much stronger data normalization
+    # Create a custom normalization function
+    def normalize_data(tensor):
+        # Handle NaN values first
+        tensor = torch.nan_to_num(tensor, nan=0.0)
+        # Apply log1p to handle extreme values but keep signs
+        sign = torch.sign(tensor)
+        log_tensor = torch.log1p(torch.abs(tensor))
+        return sign * log_tensor
+    
+    # Apply to both datasets
+    X_train_norm = normalize_data(X_train.clone())
+    y_train_norm = normalize_data(y_train.clone())
+    
+    if X_test is not None:
+        X_test_norm = normalize_data(X_test.clone())
+        y_test_norm = normalize_data(y_test.clone())
+        print(f"After normalization - X_test min: {X_test_norm.min()}, max: {X_test_norm.max()}")
+        print(f"After normalization - y_test min: {y_test_norm.min()}, max: {y_test_norm.max()}")
+    else:
+        X_test_norm, y_test_norm = None, None
+    
+    print(f"After normalization - X_train min: {X_train_norm.min()}, max: {X_train_norm.max()}")
+    print(f"After normalization - y_train min: {y_train_norm.min()}, max: {y_train_norm.max()}")
+    
+    # Use normalized data for creating datasets
+    train_dataset = TensorDataset(X_train_norm, y_train_norm)
+    total_size = len(train_dataset)
+    train_size = int(0.9 * total_size)  # 90% for training
+    val_size = total_size - train_size   # 10% for validation
+    
+    train_subset, val_subset = torch.utils.data.random_split(
+        train_dataset, [train_size, val_size])
+    
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_subset, batch_size=batch_size)
+    
+    # Test loader from test data
+    test_loader = None
+    if X_test is not None and y_test is not None:
+        test_dataset = TensorDataset(X_test_norm, y_test_norm)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size)
+        print(f"Test set: {len(test_dataset)} sequences from Oct 2022-Apr 2023")
     
     # Initialize model, optimizer, and scheduler
-    input_size = X_tensor.shape[2]  # Number of features
+    input_size = X_train.shape[2]  # Number of features
+
+    # Data normalization - check for extreme values
+    print(f"X_train min: {X_train.min()}, max: {X_train.max()}")
+    print(f"y_train min: {y_train.min()}, max: {y_train.max()}")
+    
+    # Initialize model with xavier initialization for better stability
     model = RunoffLSTM(input_size=input_size).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    
+    # Use a more stable initialization
+    for name, param in model.named_parameters():
+        if 'weight' in name:
+            nn.init.xavier_normal_(param)
+        elif 'bias' in name:
+            nn.init.constant_(param, 0.0)
+            
+    # Use a much lower learning rate
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, eps=1e-8)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
     # TensorBoard writer
     writer = SummaryWriter(f'runs/runoff_experiment_{time.strftime("%Y%m%d-%H%M%S")}')
@@ -129,6 +192,9 @@ def train_model(folder_path, epochs=100, batch_size=32, learning_rate=0.001, win
     patience = 10
     patience_counter = 0
     best_model_path = 'models/best_runoff_model.pth'
+    
+    # Add this line right before the training loop
+    prev_lr = learning_rate  # Initialize previous learning rate
     
     # Training loop
     train_losses = []
@@ -149,6 +215,14 @@ def train_model(folder_path, epochs=100, batch_size=32, learning_rate=0.001, win
         
         # Learning rate scheduling
         scheduler.step(val_loss)
+
+        for param_group in optimizer.param_groups:
+            current_lr = param_group['lr']
+    
+        if epoch > 0 and current_lr != prev_lr:
+            print(f"Learning rate adjusted to {current_lr}")
+    
+        prev_lr = current_lr
         
         # Early stopping check
         if val_loss < best_val_loss:
@@ -165,12 +239,22 @@ def train_model(folder_path, epochs=100, batch_size=32, learning_rate=0.001, win
         # Print progress
         print(f'Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
         
-        # Log histograms of model parameters
+        # Log histograms of model parameters - skip NaN values
         for name, param in model.named_parameters():
-            writer.add_histogram(f'Parameters/{name}', param, epoch)
+            if not torch.isnan(param).any():
+                try:
+                    writer.add_histogram(f'Parameters/{name}', param, epoch)
+                except ValueError as e:
+                    print(f"Warning: Could not add histogram for {name}: {e}")
     
     # Load best model for evaluation
-    model.load_state_dict(torch.load(best_model_path))
+    if np.isfinite(best_val_loss):  # Only try to load if we actually saved a model
+        try:
+            model.load_state_dict(torch.load(best_model_path))
+        except FileNotFoundError:
+            print("Warning: Could not load best model. Using final model instead.")
+    else:
+        print("Warning: No finite validation loss encountered. Using final model.")
     
     # Plot training history
     plt.figure(figsize=(12, 6))
@@ -249,20 +333,21 @@ def evaluate_model(model, test_loader, device='cpu'):
     }
 
 if __name__ == "__main__":
-    folder_path = "./data/20380357"  # Adjust as needed
+    # Update to use both folders
+    folder_paths = ["./data/20380357", "./data/21609641"]
     
-    # Train model
+    # Train model on combined data with much lower learning rate
     model, (train_loader, val_loader, test_loader) = train_model(
-        folder_path, 
+        folder_paths, 
         epochs=100,
         batch_size=32,
-        learning_rate=0.001,
+        learning_rate=0.0001,  # Much lower learning rate
         window_size=8,
         step=2
     )
     
     # Evaluate model
-    if model is not None:
+    if model is not None and test_loader is not None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         metrics = evaluate_model(model, test_loader, device)
         print(metrics)
